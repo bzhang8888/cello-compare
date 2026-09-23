@@ -60,7 +60,7 @@
   (function () {
     const CFG = window.CELLO_CONFIG || {};
     const $ = id => document.getElementById(id);
-    let RATER = null, TOKEN = null, QUEUE = [], done = new Set(), pair = null, audio = {};
+    let RATER = null, TOKEN = null, QUEUE = [], done = new Set(), pair = null, audio = {}, counts = {}, sinceRefresh = 0;
 
     function load(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
     function save(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
@@ -142,26 +142,51 @@
       const dA = QUEUE.filter(p => p.anchor && done.has(keyOf(p))).length;
       const dAll = QUEUE.filter(p => done.has(keyOf(p))).length;
       if (dA < nA) return 'Shared set: ' + dA + ' / ' + nA + ' &mdash; everyone does these first';
-      return dAll + ' judged so far &mdash; keep going as long as you like';
+      const fresh = QUEUE.filter(p => !p.anchor);
+      const covered = fresh.filter(p => (counts[keyOf(p)] || 0) > 0).length;
+      return dAll + ' judged by you &middot; team so far: ' + covered + ' / ' + fresh.length + ' new pairs answered at least once';
     }
 
-    function nextIndex() {
-      for (let i = 0; i < QUEUE.length; i++) if (!done.has(keyOf(QUEUE[i]))) return i;
-      return -1;
+    // Who gets which pair: after the shared set, hand out the pair the TEAM has answered the fewest times
+    // (ties broken by this person's own shuffled order), so coverage spreads out instead of piling up.
+    function pickNext(excludeKey) {
+      for (const p of QUEUE) if (p.anchor && !done.has(keyOf(p)) && keyOf(p) !== excludeKey) return p;
+      let best = null, bestScore = Infinity;
+      for (let i = 0; i < QUEUE.length; i++) {
+        const p = QUEUE[i], k = keyOf(p);
+        if (p.anchor || done.has(k) || k === excludeKey) continue;
+        const s = (counts[k] || 0) * 100000 + i;
+        if (s < bestScore) { bestScore = s; best = p; }
+      }
+      return best;
     }
 
-    function prefetch(i) {
-      if (i < 0 || i >= QUEUE.length) return;
-      [QUEUE[i].a, QUEUE[i].b].forEach(id => { const a = new Audio('audio/' + id + '.mp3'); a.preload = 'auto'; });
+    function prefetch(p) {
+      if (!p) return;
+      [p.a, p.b].forEach(id => { const a = new Audio('audio/' + id + '.mp3'); a.preload = 'auto'; });
     }
 
+    // everyone's answers -> how many times each pair has been answered, and which ones are mine
+    function ingest(d) {
+      const me = RATER.trim().toLowerCase().replace(/^[=+\-@\s]+/, '');
+      const c = {}, mine = new Set();
+      (d.rows || []).forEach(r => {
+        const k = r[2] + '|' + r[3];
+        c[k] = (c[k] || 0) + 1;
+        if (String(r[1]).trim().toLowerCase() === me) mine.add(k);
+      });
+      return { c: c, mine: mine };
+    }
+    async function refreshCounts() {
+      try { const s = ingest(await api({ action: 'export' })); counts = s.c; s.mine.forEach(k => done.add(k)); } catch (e) {}
+    }
     function render() {
-      const i = nextIndex();
-      if (i === -1) {
-        showMsg('You\'ve judged all ' + QUEUE.length + ' pairs. Thank you!<small>Nothing more to do right now &mdash; come back if we add more pairs.</small>');
+      const p = pickNext();
+      if (!p) {
+        showMsg('You\'ve judged every pair we have. Thank you!<small>Nothing more to do right now &mdash; come back if we add more pairs.</small>');
         return;
       }
-      pair = QUEUE[i];
+      pair = p;
       $('app').innerHTML =
         '<div class="row">' +
           '<div class="card" id="cardA"><h2>TAKE A</h2>' +
@@ -180,7 +205,7 @@
         audio[w].onended = () => setPlaying(w, false);
         audio[w].onerror = () => { setPlaying(w, false); toast('Could not load take ' + w + ' — check your connection', true); };
       });
-      prefetch(i + 1);
+      prefetch(pickNext(keyOf(pair)));
     }
 
     function setPlaying(w, on) {
@@ -205,7 +230,9 @@
       try {
         await api({ action: 'judge', rater: RATER, a: pair.a, b: pair.b, winner: winner, pair: pair.id });
         done.add(keyOf(pair));
+        counts[keyOf(pair)] = (counts[keyOf(pair)] || 0) + 1;
         toast('Saved ✓');
+        if (++sinceRefresh >= 8) { sinceRefresh = 0; refreshCounts(); }   // pick up what teammates have answered meanwhile
         render();
       } catch (e) {
         toast('Could not save — check your connection and tap again', true);
@@ -216,11 +243,12 @@
     async function start() {
       showMsg('loading&hellip;');
       try {
-        const [q, prog] = await Promise.all([
+        const [q, all] = await Promise.all([
           fetch('queue.json').then(r => r.json()),
-          api({ action: 'progress', rater: RATER }),
+          api({ action: 'export' }),
         ]);
-        QUEUE = buildOrder(q, RATER); done = new Set(prog.done || []);
+        QUEUE = buildOrder(q, RATER);
+        const s = ingest(all); done = s.mine; counts = s.c; sinceRefresh = 0;
         render();
       } catch (e) {
         if (String(e.message || e) === 'bad access key') {
