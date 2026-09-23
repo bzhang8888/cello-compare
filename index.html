@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Which take is better?</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, Segoe UI, Arial, sans-serif; background: #f7f6f3; color: #22252e;
+         max-width: 720px; margin: 0 auto; padding: 32px 18px 90px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .sub { color: #666b75; font-size: 14px; margin-bottom: 20px; line-height: 1.45; }
+  .whoami { font-size: 12.5px; color: #666b75; margin-bottom: 18px; }
+  .whoami button { border: none; background: none; color: #2a78d6; cursor: pointer; font-size: 12.5px;
+                    text-decoration: underline; padding: 0; }
+  .row { display: flex; gap: 18px; margin-bottom: 18px; flex-wrap: wrap; }
+  .card { flex: 1 1 260px; background: #fff; border: 2px solid #e1dfd8; border-radius: 10px; padding: 22px;
+          text-align: center; transition: border-color 0.15s, background 0.15s; }
+  .card.playing { border-color: #2a78d6; background: #eef5fc; }
+  .card h2 { margin: 0 0 12px; font-size: 15px; color: #666b75; letter-spacing: 1px; }
+  button.play { background: #172136; color: #fff; border: none; border-radius: 6px; padding: 10px 18px;
+                font-size: 14px; cursor: pointer; margin-bottom: 14px; min-width: 150px; }
+  .card.playing button.play { background: #2a78d6; }
+  button.pick { width: 100%; padding: 14px; border-radius: 8px; border: 1.5px solid #2e7d4f;
+                background: #e3f3e6; color: #1c5533; font-weight: bold; font-size: 15px; cursor: pointer; }
+  button.pick:hover:not(:disabled) { background: #2e7d4f; color: #fff; }
+  button:disabled { opacity: 0.6; cursor: default; }
+  .tie { background: #f1f0ec; color: #666b75; padding: 10px 24px; border-radius: 8px;
+         border: 1px solid #c9c7c0; cursor: pointer; display: block; margin: 6px auto 0; font-size: 14px; }
+  .progress { color: #666b75; font-size: 13px; margin-top: 26px; text-align: center; }
+  .hint { color: #8a8e97; font-size: 12px; margin-top: 6px; text-align: center; }
+  .msg { text-align: center; font-size: 16px; padding: 50px 10px; line-height: 1.5; }
+  .msg small { display: block; color: #666b75; font-size: 13px; margin-top: 8px; }
+  .msg button { margin-top: 14px; padding: 9px 20px; border-radius: 6px; border: none; background: #172136;
+                color: #fff; cursor: pointer; font-size: 14px; }
+  .toast { position: fixed; bottom: 26px; left: 50%; transform: translateX(-50%) translateY(20px);
+           background: #172136; color: #fff; padding: 10px 20px; border-radius: 24px; font-size: 14px;
+           opacity: 0; transition: opacity 0.18s, transform 0.18s; pointer-events: none; max-width: 90vw; }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  .toast.bad { background: #b03b2e; }
+  .overlay { position: fixed; inset: 0; background: rgba(20,18,14,0.5); display: flex;
+             align-items: center; justify-content: center; padding: 20px; z-index: 10; }
+  .overlay .box { background: #fff; border-radius: 12px; padding: 26px; max-width: 340px; width: 100%; }
+  .overlay h2 { margin: 0 0 6px; font-size: 18px; }
+  .overlay p { color: #666b75; font-size: 13.5px; margin: 0 0 14px; line-height: 1.45; }
+  .overlay input { width: 100%; padding: 9px 11px; border-radius: 6px; border: 1px solid #e1dfd8;
+                    font-size: 16px; margin-bottom: 12px; }
+  .overlay button.go { width: 100%; padding: 11px; border-radius: 6px; border: none; background: #172136;
+                        color: #fff; font-weight: bold; font-size: 14px; cursor: pointer; }
+</style></head>
+<body>
+  <h1>Which take is better?</h1>
+  <div class="sub">Listen to both, pick the one that sounds like better cello playing. If you can't
+  tell, say so &mdash; that's useful information too.</div>
+  <div class="whoami" id="whoami" hidden>listening as <b id="whoamiName"></b> &middot;
+    <button onclick="changeRater()">not you?</button></div>
+  <div id="app"></div>
+  <div class="toast" id="toast"></div>
+
+  <script src="config.js"></script>
+  <script>
+  (function () {
+    const CFG = window.CELLO_CONFIG || {};
+    const $ = id => document.getElementById(id);
+    let RATER = null, TOKEN = null, QUEUE = [], done = new Set(), pair = null, audio = {};
+
+    function load(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+    function save(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+    const keyOf = p => p.a + '|' + p.b;
+
+    // A shared link looks like  .../#t=ACCESSKEY&s=<answer-sheet address>   (optionally  &as=Name  to pre-fill the name).
+    // The key and address travel in the link, so nothing secret is stored in this public page.
+    const SCRIPT_RE = /^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]+\/exec$/;
+    (function readHash() {
+      const h = new URLSearchParams(location.hash.replace(/^#/, ''));
+      if (h.get('t')) save('cello_token', h.get('t'));
+      if (h.get('s') && SCRIPT_RE.test(h.get('s'))) save('cello_script', h.get('s'));
+      if (h.get('as')) save('cello_rater', h.get('as').slice(0, 60));
+    })();
+    TOKEN = load('cello_token');
+    const SCRIPT_URL = CFG.scriptUrl || (SCRIPT_RE.test(load('cello_script') || '') ? load('cello_script') : '');
+
+    async function api(params) {
+      const q = new URLSearchParams(Object.assign({}, params, { t: TOKEN }));
+      const r = await fetch(SCRIPT_URL + '?' + q.toString());
+      const d = await r.json();
+      if (!d.ok) throw new Error(d.error || 'request failed');
+      return d;
+    }
+
+    function toast(msg, bad) {
+      const t = $('toast');
+      t.textContent = msg; t.className = 'toast show' + (bad ? ' bad' : '');
+      clearTimeout(window.__toastTimer);
+      window.__toastTimer = setTimeout(() => t.classList.remove('show'), bad ? 3200 : 1400);
+    }
+
+    function showMsg(html, retry) {
+      $('app').innerHTML = '<div class="msg">' + html + (retry ? '<br><button onclick="location.reload()">Try again</button>' : '') + '</div>';
+    }
+
+    function setRater(n) {
+      RATER = n;
+      $('whoami').hidden = false;
+      $('whoamiName').textContent = n;
+    }
+
+    function askName(prefill) {
+      const wrap = document.createElement('div');
+      wrap.className = 'overlay';
+      wrap.innerHTML = '<div class="box"><h2>Who\'s listening?</h2>' +
+        '<p>Just so we know whose ears said what &mdash; first name is fine. Use the same name every time ' +
+        'and you\'ll pick up exactly where you left off, on any device.</p>' +
+        '<input id="nameInput" placeholder="e.g. Sam" maxlength="40">' +
+        '<button class="go" id="nameGo">Start listening</button></div>';
+      document.body.appendChild(wrap);
+      const input = $('nameInput');
+      input.value = prefill || '';
+      input.focus();
+      const go = () => {
+        const v = input.value.trim();
+        if (!v) { input.focus(); return; }
+        save('cello_rater', v); wrap.remove(); setRater(v); start();
+      };
+      $('nameGo').onclick = go;
+      input.addEventListener('keydown', e => { if (e.key === 'Enter') go(); });
+    }
+    window.changeRater = function () { askName(RATER); };
+
+    function nextIndex() {
+      for (let i = 0; i < QUEUE.length; i++) if (!done.has(keyOf(QUEUE[i]))) return i;
+      return -1;
+    }
+
+    function prefetch(i) {
+      if (i < 0 || i >= QUEUE.length) return;
+      [QUEUE[i].a, QUEUE[i].b].forEach(id => { const a = new Audio('audio/' + id + '.mp3'); a.preload = 'auto'; });
+    }
+
+    function render() {
+      const i = nextIndex();
+      if (i === -1) {
+        showMsg('You\'ve judged all ' + QUEUE.length + ' pairs. Thank you!<small>Nothing more to do right now &mdash; come back if we add more pairs.</small>');
+        return;
+      }
+      pair = QUEUE[i];
+      $('app').innerHTML =
+        '<div class="row">' +
+          '<div class="card" id="cardA"><h2>TAKE A</h2>' +
+            '<button class="play" id="playA" onclick="playClip(\'A\')">&#9654; Play A</button>' +
+            '<button class="pick" id="pickA" onclick="judge(\'a\')">A is better</button></div>' +
+          '<div class="card" id="cardB"><h2>TAKE B</h2>' +
+            '<button class="play" id="playB" onclick="playClip(\'B\')">&#9654; Play B</button>' +
+            '<button class="pick" id="pickB" onclick="judge(\'b\')">B is better</button></div>' +
+        '</div>' +
+        '<button class="tie" id="pickTie" onclick="judge(\'tie\')">Too close to tell</button>' +
+        '<div class="progress">' + done.size + ' / ' + QUEUE.length + ' judged by you</div>' +
+        '<div class="hint">Your answers save as you go &mdash; close this any time and come back with the same name.</div>';
+      audio = { A: new Audio('audio/' + pair.a + '.mp3'), B: new Audio('audio/' + pair.b + '.mp3') };
+      ['A', 'B'].forEach(w => {
+        audio[w].preload = 'auto';
+        audio[w].onended = () => setPlaying(w, false);
+        audio[w].onerror = () => { setPlaying(w, false); toast('Could not load take ' + w + ' — check your connection', true); };
+      });
+      prefetch(i + 1);
+    }
+
+    function setPlaying(w, on) {
+      const card = $('card' + w), btn = $('play' + w);
+      if (!card) return;
+      card.classList.toggle('playing', on);
+      btn.innerHTML = on ? '&#9208; Playing ' + w + '&hellip;' : '&#9654; Play ' + w;
+    }
+
+    window.playClip = function (w) {
+      const other = w === 'A' ? 'B' : 'A', el = audio[w];
+      if (!el.paused) { el.pause(); setPlaying(w, false); return; }     // click again to stop
+      audio[other].pause(); setPlaying(other, false);
+      el.currentTime = 0;
+      el.play().then(() => setPlaying(w, true)).catch(() => toast('Could not play — tap Play again', true));
+    };
+
+    window.judge = async function (winner) {
+      const ids = ['pickA', 'pickB', 'pickTie'];
+      ids.forEach(id => $(id).disabled = true);
+      try { audio.A.pause(); audio.B.pause(); } catch (e) {}
+      try {
+        await api({ action: 'judge', rater: RATER, a: pair.a, b: pair.b, winner: winner,
+                    pair: QUEUE.indexOf(pair) });
+        done.add(keyOf(pair));
+        toast('Saved ✓');
+        render();
+      } catch (e) {
+        toast('Could not save — check your connection and tap again', true);
+        ids.forEach(id => { const b = $(id); if (b) b.disabled = false; });
+      }
+    };
+
+    async function start() {
+      showMsg('loading&hellip;');
+      try {
+        const [q, prog] = await Promise.all([
+          fetch('queue.json').then(r => r.json()),
+          api({ action: 'progress', rater: RATER }),
+        ]);
+        QUEUE = q; done = new Set(prog.done || []);
+        render();
+      } catch (e) {
+        if (String(e.message || e) === 'bad access key') {
+          showMsg('That link\'s access key isn\'t valid.<small>Please open the exact link you were sent (copy the whole thing, including the part after the #).</small>');
+        } else {
+          showMsg('Can\'t reach the answer sheet right now.<small>' + String(e.message || e) + '</small>', true);
+        }
+      }
+    }
+
+    if (!SCRIPT_URL || !TOKEN) {
+      showMsg('Please open the exact link you were sent.<small>It carries the access key and the answer-sheet address this page needs (copy the whole thing, including the part after the #).</small>');
+    } else {
+      const saved = load('cello_rater');
+      if (saved) { setRater(saved); start(); } else { askName(); }
+    }
+  })();
+  </script>
+</body></html>
